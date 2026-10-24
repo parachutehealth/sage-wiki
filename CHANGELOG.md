@@ -2,6 +2,58 @@
 
 ## [Unreleased]
 
+## 0.2.12 — 2026-10-24
+
+### Fixed
+
+- **BM25-only workspaces no longer deadlock tier-3 compilation (#218).** With
+  no embedding provider configured (an officially supported setup — `status`
+  reports `embed_provider: none (BM25-only)`), already-compiled documents
+  sat in a state no code path advanced: `compile --force` printed "Nothing
+  to compile — wiki is up to date.",
+  template-drift recompiles never fired, and Tier 1 re-claimed the same
+  documents every run making no progress — silently, with no diagnostic.
+  Three fixes: tier-3 completion no longer requires the embedding pass
+  (embedding is an optional enhancement of the LLM tier, not its
+  prerequisite — applies to both the SQLite and Postgres queues); under a
+  nil embedder the Tier-1 pass marks embedding done (stops the re-claim
+  churn; not a vector backfill — see below); and the classification
+  fall-through now logs the item's pass state at Debug level (run with
+  `-vv` to see it — the default log level is WARN). Existing BM25-only
+  corpora heal on the next compile with no migration.
+
+- **`compile --force` now genuinely regenerates summaries (#219).** The
+  summarization pass served any on-disk summary whose source hash matched —
+  regardless of `--force`. Since prompt-template hashes enter the compile
+  key, a forced run after editing `prompts/*.md` reported the document as
+  recompiled while writing the cached summary back byte-identical: the new
+  template never took effect, and the only workaround was deleting
+  `wiki/summaries/` by hand. `--force` now bypasses the summary cache (the
+  cache keeps its actual job: cheap resume of interrupted compiles).
+
+- **Security bumps (GO-2026-6629, GO-2026-6809).** `golang.org/x/text`
+  v0.40.0 → v0.41.0 (panic parsing crafted input in x/text/secure/precis,
+  symbol-level, reachable) and Go toolchain 1.26.6 → 1.26.10 (stdlib
+  crypto/x509: distrust compromised intermediate certificates).
+
+### Known limitations (documented, deliberate)
+
+- Documents compiled while no embedder was configured carry no source
+  vectors (reconcile backfills article vectors only, never summaries or
+  sources). An explicit `sage-wiki compile --re-embed` restores them.
+- Editing a prompt template and running a PLAIN `compile` (not `--force`)
+  still serves the cached summary on an unchanged source — the reuse check
+  is source-hash-keyed only. `--force` is the supported way to apply
+  template edits to unchanged documents today.
+
+### Internal
+
+- **CI: qualification observer repaired end-to-end** (#228, #229): the
+  exit-contract inversion (a still-filling window is not an alert) and
+  data-branch persistence under branch protection — the verdict now
+  durably accumulates on `ci/qualification-data`. The timing-flake family
+  hardening (#210) also landed in this window.
+
 ## 0.2.11 — 2026-10-03
 
 ### Added

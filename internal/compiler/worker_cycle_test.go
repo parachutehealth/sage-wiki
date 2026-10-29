@@ -34,6 +34,9 @@ type workerHarness struct {
 	items   store.CompileItemStore
 	worker  *Worker
 	embeds  atomic.Int32
+	// failExtractFor, when set, makes a concept-extraction call whose prompt
+	// names this source path answer with JSON that fails the schema.
+	failExtractFor atomic.Pointer[string]
 }
 
 // newWorkerHarness builds a temp project whose openai-compatible provider
@@ -69,6 +72,9 @@ func newWorkerHarness(t *testing.T, defaultTier int, embedStatus int) *workerHar
 		switch {
 		case strings.Contains(lastMsg, "concept extraction system"):
 			content = `[{"name": "test-concept", "aliases": [], "sources": ["raw/a.md"], "type": "concept"}]`
+			if p := h.failExtractFor.Load(); p != nil && strings.Contains(lastMsg, "### Source: "+*p) {
+				content = `{"not": "the concepts array"}`
+			}
 		case strings.Contains(lastMsg, "wiki author writing a comprehensive article"):
 			content = "---\nconcept: test-concept\n---\n\n# Test Concept\n\nA test concept."
 		default:
@@ -244,6 +250,55 @@ func TestWorker_ProcessesTier3Items(t *testing.T) {
 	matches, _ := filepath.Glob(filepath.Join(h.dir, "wiki", "summaries", "*a.md"))
 	if len(matches) == 0 {
 		t.Error("no summary file written")
+	}
+}
+
+// A failed concept-extraction batch must not release its sources as done:
+// with one summary per batch and b.md's batch failing, b.md stays pending
+// with an attempt counted and without its extract/write passes, and the
+// next cycle compiles it.
+func TestWorker_FailedExtractBatchSourcesRetry(t *testing.T) {
+	h := newWorkerHarness(t, 3, http.StatusOK)
+	cfgPath := filepath.Join(h.dir, "config.yaml")
+	cfg, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg = []byte(strings.Replace(string(cfg), "compiler:\n", "compiler:\n  extract_batch_size: 1\n", 1))
+	if err := os.WriteFile(cfgPath, cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.writeSource(t, "a.md", "# Alpha\n\nAlpha content for the full pipeline.")
+	h.writeSource(t, "b.md", "# Beta\n\nBeta content for the full pipeline.")
+	h.newWorker(t, 50*time.Millisecond, time.Second, 5)
+	for _, p := range []string{"raw/a.md", "raw/b.md"} {
+		if err := h.items.Upsert(CompileItem{SourcePath: p, Hash: "h1", FileType: "md", Tier: 3}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	failing := "raw/b.md"
+	h.failExtractFor.Store(&failing)
+
+	if _, err := h.worker.cycle(context.Background()); err != nil {
+		t.Fatalf("cycle 1: %v", err)
+	}
+	a, _ := h.items.GetByPath("raw/a.md")
+	if a.Status != "done" || !a.PassExtracted || !a.PassWritten {
+		t.Errorf("a.md after cycle 1: status %q, extracted %v, written %v; want done with both passes", a.Status, a.PassExtracted, a.PassWritten)
+	}
+	b, _ := h.items.GetByPath("raw/b.md")
+	if b.Status != "pending" || b.Attempts != 1 || b.PassExtracted || b.PassWritten {
+		t.Fatalf("b.md after cycle 1: status %q, attempts %d, extracted %v, written %v; want pending, 1 attempt, neither pass",
+			b.Status, b.Attempts, b.PassExtracted, b.PassWritten)
+	}
+
+	h.failExtractFor.Store(nil)
+	if _, err := h.worker.cycle(context.Background()); err != nil {
+		t.Fatalf("cycle 2: %v", err)
+	}
+	b, _ = h.items.GetByPath("raw/b.md")
+	if b.Status != "done" || !b.PassExtracted || !b.PassWritten {
+		t.Errorf("b.md after cycle 2: status %q, extracted %v, written %v; want done with both passes", b.Status, b.PassExtracted, b.PassWritten)
 	}
 }
 

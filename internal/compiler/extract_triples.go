@@ -356,6 +356,9 @@ type FunctionalSupersession struct {
 	KeepTargetID  string
 	NewValidFrom  string
 	InvalidatedBy string
+	// Threshold is the auto-apply threshold the edge cleared; the sweep
+	// uses it to look for later-dated winners (laterFunctionalWinners).
+	Threshold float64
 }
 
 // temporalHooks carries the write-time supersession context into persistGraph
@@ -410,9 +413,26 @@ func emitEdgeConflict(h temporalHooks, sourceDoc, question, answer string) {
 // alias form created or applied by THIS run is invisible to its form-set
 // expansion — and the resolution replay would re-derive a live copy of the
 // superseded edge. InvalidateFunctional only touches not-yet-invalidated
-// rows, so re-firing is a no-op wherever the first trigger sufficed.
+// rows, so re-firing is a no-op wherever the first trigger sufficed. When an
+// alias applied by this run reveals later-dated winners the write-time check
+// could not see, the latest winner's supersession is re-fired instead, which
+// closes this edge, and any other competitor, where that winner starts.
 func runSupersessionSweep(ont store.OntologyStore, supersessions []FunctionalSupersession) {
 	for _, sup := range supersessions {
+		winners, err := laterFunctionalWinners(ont, ExtractedRelation{Source: sup.SourceID, Predicate: sup.Predicate, Target: sup.KeepTargetID},
+			sup.NewValidFrom, sup.Threshold)
+		if err != nil {
+			// Re-firing blind could close a newer edge; leave this one for a
+			// later compile.
+			log.Warn("triples: post-resolution sweep skipped an edge", "source", sup.SourceID,
+				"predicate", sup.Predicate, "error", err)
+			continue
+		}
+		if len(winners) > 0 {
+			w := winners[len(winners)-1]
+			sup = FunctionalSupersession{SourceID: w.SourceID, Predicate: sup.Predicate, KeepTargetID: w.TargetID,
+				NewValidFrom: w.ValidFrom, InvalidatedBy: w.ID}
+		}
 		if _, err := ont.InvalidateFunctional(sup.SourceID, sup.Predicate,
 			sup.KeepTargetID, sup.NewValidFrom, sup.InvalidatedBy); err != nil {
 			log.Warn("triples: post-resolution sweep failed", "source", sup.SourceID,
@@ -506,7 +526,7 @@ func persistGraph(ont store.OntologyStore, g ExtractedGraph, concepts []Extracte
 			continue
 		}
 		edgeID := tripleRelationID(r.Source, r.Predicate, r.Target)
-		if err := ont.AddRelation(store.Relation{
+		rel := store.Relation{
 			ID:         edgeID,
 			SourceID:   r.Source,
 			TargetID:   r.Target,
@@ -515,7 +535,27 @@ func persistGraph(ont store.OntologyStore, g ExtractedGraph, concepts []Extracte
 			Confidence: r.Confidence,
 			SourceDoc:  sourceDoc,
 			ValidFrom:  validFrom,
-		}); err != nil {
+		}
+		// A functional edge dated before a live edge that already superseded
+		// on the same source and predicate does not replace it: it is written
+		// as history, closed where that edge starts, as it would have been had
+		// the sources compiled in date order.
+		var later *store.Relation
+		if hooks.enabled && hooks.functional[r.Predicate] && r.Confidence >= hooks.threshold && validFrom != "" {
+			winners, err := laterFunctionalWinners(ont, r, validFrom, hooks.threshold)
+			if err != nil {
+				// Written blind, the edge could close a newer one; skip it as a
+				// failed write is skipped.
+				log.Warn("triples: relation skipped — later-edge lookup failed",
+					"source", r.Source, "predicate", r.Predicate, "target", r.Target, "error", err)
+				continue
+			}
+			if len(winners) > 0 {
+				later = &winners[0]
+				rel.ValidTo, rel.InvalidatedBy = later.ValidFrom, later.ID
+			}
+		}
+		if err := ont.AddRelation(rel); err != nil {
 			log.Warn("triples: relation write failed",
 				"source", r.Source, "predicate", r.Predicate, "target", r.Target, "error", err)
 			continue
@@ -537,6 +577,9 @@ func persistGraph(ont store.OntologyStore, g ExtractedGraph, concepts []Extracte
 		if !hooks.functional[r.Predicate] {
 			continue
 		}
+		if later != nil {
+			continue
+		}
 		if r.Confidence >= hooks.threshold {
 			vf := validFrom
 			if vf == "" {
@@ -555,6 +598,7 @@ func persistGraph(ont store.OntologyStore, g ExtractedGraph, concepts []Extracte
 				KeepTargetID:  r.Target,
 				NewValidFrom:  vf,
 				InvalidatedBy: edgeID,
+				Threshold:     hooks.threshold,
 			})
 		} else {
 			var current []string
@@ -577,6 +621,43 @@ func persistGraph(ont store.OntologyStore, g ExtractedGraph, concepts []Extracte
 		}
 	}
 	return entities, relations, persisted, supersessions
+}
+
+// laterFunctionalWinners returns the not-yet-superseded edges from r.Source
+// on r.Predicate to another target that start after validFrom with at least
+// threshold confidence, earliest first. Equal dates do not count, so of two
+// edges dated alike the later compiled still wins. It reads every alias form
+// of the source and target, as InvalidateFunctional does, and as of the end
+// of time, so an edge dated in the future counts too: InvalidateFunctional
+// would otherwise close it.
+func laterFunctionalWinners(ont store.OntologyStore, r ExtractedRelation, validFrom string, threshold float64) ([]store.Relation, error) {
+	applied, err := ont.ListAliases(store.AliasApplied)
+	if err != nil {
+		return nil, fmt.Errorf("list aliases: %w", err)
+	}
+	keep := map[string]bool{}
+	for _, f := range ontology.IDForms(r.Target, applied) {
+		keep[f] = true
+	}
+	var winners []store.Relation
+	for _, src := range ontology.IDForms(r.Source, applied) {
+		rels, err := ont.GetRelationsAt(src, store.Outbound, r.Predicate, time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC))
+		if err != nil {
+			return nil, fmt.Errorf("read %s edges: %w", src, err)
+		}
+		for _, cr := range rels {
+			if !keep[cr.TargetID] && cr.ValidFrom > validFrom && cr.Confidence >= threshold {
+				winners = append(winners, cr)
+			}
+		}
+	}
+	sort.Slice(winners, func(i, j int) bool {
+		if winners[i].ValidFrom != winners[j].ValidFrom {
+			return winners[i].ValidFrom < winners[j].ValidFrom
+		}
+		return winners[i].ID < winners[j].ID
+	})
+	return winners, nil
 }
 
 // Per-document caps and fan-out defaults. Applied in-function because

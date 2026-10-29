@@ -115,8 +115,9 @@ type Relation struct {
 	// (writer-populated, RFC3339 UTC, "" = always valid); ValidTo is when it
 	// stopped ("" = currently valid); InvalidatedBy names the superseding
 	// edge. Default reads filter to live edges; ValidFrom joins the upsert
-	// SET list first-writer-wins; ValidTo/InvalidatedBy are written only by
-	// InvalidateFunctional.
+	// SET list first-writer-wins; ValidTo/InvalidatedBy are written by
+	// InvalidateFunctional, or on insert for an edge that arrives already
+	// superseded by a later-dated one (the triples pass).
 	ValidFrom     string `json:"valid_from,omitempty"`
 	ValidTo       string `json:"valid_to,omitempty"`
 	InvalidatedBy string `json:"invalidated_by,omitempty"`

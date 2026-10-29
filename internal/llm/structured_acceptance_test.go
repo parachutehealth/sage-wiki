@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -210,4 +211,83 @@ func TestFallbackParity(t *testing.T) {
 		}
 	}
 	_ = server
+}
+
+// TestStructuredStringEncodedValues: Claude Haiku on Bedrock intermittently
+// answers the forced concepts tool with the items array encoded as a JSON
+// string. The first two inputs come from recorded Claude Haiku 5.5 replies
+// (2026-10-29). The first is one cut to its first two concepts and must
+// decode like the array form. The second is a concept from a reply whose JSON
+// the model broke inside the string; it must still fail validation, as it did
+// before. The third is a bare-array reply whose nested field is a string, and
+// whose other fields must come through unchanged.
+func TestStructuredStringEncodedValues(t *testing.T) {
+	const decodable = `{"items": "[{\"name\":\"project-olympics\",\"aliases\":[\"Olympics\"],\"sources\":[\"rendered/notion/olympics-home.md\",\"rendered/notion/decision-log.md\",\"rendered/notion/kickoff-call.md\"],\"type\":\"project\"},{\"name\":\"project-cowboy\",\"aliases\":[\"Cowboy\"],\"sources\":[\"rendered/notion/olympics-home.md\",\"rendered/notion/kickoff-call.md\"],\"type\":\"project\"}]"}`
+	const malformed = `{"items": "[{\"name\":\"eb-summary\",\"aliases\":[\"E&B Summary\"],\"sources\":[\"rendered/notion/olympics-home.md\",\"rendered/notion\":\"\",\"rendered/notion/decision-log.md\"],\"type\":\"artifact\"}]"}`
+
+	anthropic := func(t *testing.T, input string) (json.RawMessage, error) {
+		t.Helper()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"model": "claude-haiku-5-5", "id": "msg_bdrk_01", "type": "message", "role": "assistant",
+				"content": [{"type": "tool_use", "id": "toolu_bdrk_01", "name": "concepts", "input": ` + input + `}],
+				"stop_reason": "tool_use", "usage": {"input_tokens": 2729, "output_tokens": 989}}`))
+		}))
+		defer server.Close()
+		client, err := NewClient("anthropic", "fake-key", server.URL, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, _, err := client.StructuredCompletion(t.Context(), []Message{{Role: "user", Content: "x"}}, chattySchema(), CallOpts{Model: "claude-haiku-5-5"})
+		return payload, err
+	}
+	type concept struct {
+		Name    string   `json:"name"`
+		Sources []string `json:"sources"`
+	}
+
+	t.Run("decodable string", func(t *testing.T) {
+		payload, err := anthropic(t, decodable)
+		if err != nil {
+			t.Fatalf("string-encoded items rejected: %v", err)
+		}
+		var items []concept
+		if err := json.Unmarshal(payload, &items); err != nil {
+			t.Fatalf("payload is not the items array: %s (%v)", payload, err)
+		}
+		if len(items) != 2 || items[0].Name != "project-olympics" || items[1].Name != "project-cowboy" || len(items[0].Sources) != 3 {
+			t.Errorf("items = %+v, want project-olympics (3 sources) and project-cowboy", items)
+		}
+	})
+
+	t.Run("malformed string", func(t *testing.T) {
+		if _, err := anthropic(t, malformed); err == nil || !strings.Contains(err.Error(), "expected array") {
+			t.Fatalf("err = %v, want the validation error for a non-array items", err)
+		}
+	})
+
+	t.Run("bare array with a string field", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]string{
+					"content": `[{"name": "caching", "sources": "[\"doc.md\"]", "type": "technique", "id": 9007199254740993}]`}}},
+				"model": "gpt-test",
+			})
+		}))
+		defer server.Close()
+		client, err := NewClient("openai", "fake-key", server.URL, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, _, err := client.StructuredCompletion(t.Context(), []Message{{Role: "user", Content: "x"}}, chattySchema(), CallOpts{Model: "gpt-test"})
+		if err != nil {
+			t.Fatalf("bare array with a string-encoded field rejected: %v", err)
+		}
+		var items []concept
+		if err := json.Unmarshal(payload, &items); err != nil || len(items) != 1 || len(items[0].Sources) != 1 || items[0].Sources[0] != "doc.md" {
+			t.Errorf("payload = %s (%v), want one concept with sources [doc.md]", payload, err)
+		}
+		if !strings.Contains(string(payload), `"id":9007199254740993`) {
+			t.Errorf("payload = %s, want the integer id unchanged", payload)
+		}
+	})
 }

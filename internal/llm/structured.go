@@ -264,6 +264,14 @@ func (c *Client) StructuredCompletion(ctx context.Context, messages []Message, s
 		return nil, "", fmt.Errorf("llm: structured completion: empty payload")
 	}
 
+	// Some models answer a forced tool call with an array or object field
+	// encoded as a JSON string ({"items": "[{...}]"}); decode those first,
+	// against the envelope and, for a bare-array reply, the array schema.
+	payload = decodeStringEncoded(schema.Envelope(), payload, schema.Name)
+	if schema.IsArray {
+		payload = decodeStringEncoded(schema.Schema, payload, schema.Name)
+	}
+
 	// Validate: envelope first, then the bare array schema (tolerant of
 	// providers and test doubles that answer the envelope-shaped request
 	// with the bare array — both are schema-validated; no silent pass).

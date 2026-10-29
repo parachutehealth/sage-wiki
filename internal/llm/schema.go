@@ -1,9 +1,12 @@
 package llm
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/xoai/sage-wiki/internal/log"
 )
 
 // JSONSchema is a call site's canonical JSON Schema (draft-07 subset).
@@ -72,6 +75,87 @@ func ValidateJSON(schema map[string]any, payload json.RawMessage) error {
 		return fmt.Errorf("structured: unparseable payload: %w", err)
 	}
 	return validateValue(schema, v, "$")
+}
+
+// decodeStringEncoded returns payload with every value the schema types as
+// an array or object, but which arrived as a JSON string holding one,
+// replaced by the decoded value. Some models (Claude Haiku on forced
+// tool_use) intermittently answer {"items": "[{...}]"} instead of
+// {"items": [{...}]}. A string that does not decode to the expected kind is
+// left alone, so validation fails on it exactly as before. payload is
+// returned unchanged when nothing was decoded.
+func decodeStringEncoded(schema map[string]any, payload json.RawMessage, name string) json.RawMessage {
+	v, err := unmarshalNumbers(payload)
+	if err != nil {
+		return payload
+	}
+	v, changed := decodeStringValues(schema, v, "$", name)
+	if !changed {
+		return payload
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return payload
+	}
+	return out
+}
+
+func decodeStringValues(schema map[string]any, v any, path, name string) (any, bool) {
+	typ, _ := schema["type"].(string)
+	changed := false
+	if s, ok := v.(string); ok && (typ == "array" || typ == "object") {
+		if decoded, err := unmarshalNumbers([]byte(s)); err == nil {
+			_, isArr := decoded.([]any)
+			_, isObj := decoded.(map[string]any)
+			if (typ == "array" && isArr) || (typ == "object" && isObj) {
+				log.Warn("structured: decoded a JSON-string value", "schema", name, "path", path, "type", typ)
+				v, changed = decoded, true
+			}
+		}
+	}
+	switch typ {
+	case "array":
+		arr, ok := v.([]any)
+		if !ok {
+			return v, changed
+		}
+		items, _ := schema["items"].(map[string]any)
+		for i, el := range arr {
+			var c bool
+			arr[i], c = decodeStringValues(items, el, fmt.Sprintf("%s[%d]", path, i), name)
+			changed = changed || c
+		}
+	case "object":
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return v, changed
+		}
+		props, _ := schema["properties"].(map[string]any)
+		for k, sub := range props {
+			val, present := obj[k]
+			if !present {
+				continue
+			}
+			subSchema, _ := sub.(map[string]any)
+			var c bool
+			obj[k], c = decodeStringValues(subSchema, val, path+"."+k, name)
+			changed = changed || c
+		}
+	}
+	return v, changed
+}
+
+// unmarshalNumbers is json.Unmarshal into an any that keeps numbers as
+// json.Number, so decodeStringEncoded re-marshals them digit for digit.
+func unmarshalNumbers(data []byte) (any, error) {
+	if !json.Valid(data) {
+		return nil, fmt.Errorf("structured: invalid JSON")
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var v any
+	err := dec.Decode(&v)
+	return v, err
 }
 
 func validateValue(schema map[string]any, v any, path string) error {

@@ -88,10 +88,13 @@ is comparably limited on both backends.
 
 ### Pool sizing
 
-The pinned advisory-lock connection consumes one `max_open` slot
-permanently; a long re-embed consumes another transiently. Effective pool is
-`max_open − 1` (and `−2` during re-embed). The default 10 is comfortable;
-below 4 is not recommended for writer processes.
+The advisory-lock connection is not taken from the pool: a writer process
+holds one extra connection per vault, shared by all of its writer backends
+(`serve` opens one each for the worker, web UI and MCP server). Plan the
+server's `max_connections` for `max_open` per backend plus one per writer
+process. A long re-embed consumes one pool slot transiently, so the
+effective pool is `max_open − 1` during re-embed. The default 10 is
+comfortable; below 4 is not recommended for writer processes.
 
 ## Changing the embedding model / vector dimension
 

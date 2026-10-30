@@ -151,16 +151,37 @@ func Open(dsn string, opts store.OpenOptions) (store.Backend, error) {
 // each other out. Their write transactions still serialize through the
 // per-tx xact lock.
 type sessionLock struct {
-	scope string
-	db    *sql.DB
-	conn  *sql.Conn
-	refs  int
+	slot *lockSlot
+	db   *sql.DB
+	conn *sql.Conn
+	refs int
+}
+
+// lockSlot coordinates one vault's opens and closes in this process. Its
+// semaphore is held across the network calls that take, probe or release
+// the vault's lock, so a vault whose lock another process holds never
+// delays another vault, and a caller waiting on it gives up with its ctx.
+type lockSlot struct {
+	sem  chan struct{}
+	held *sessionLock
 }
 
 var (
-	sessionLocksMu sync.Mutex
-	sessionLocks   = map[string]*sessionLock{}
+	sessionLocksMu sync.Mutex // guards the map only, never held across I/O
+	sessionLocks   = map[string]*lockSlot{}
 )
+
+// lockSlotFor returns the vault's slot, creating it on first use.
+func lockSlotFor(scope string) *lockSlot {
+	sessionLocksMu.Lock()
+	defer sessionLocksMu.Unlock()
+	s := sessionLocks[scope]
+	if s == nil {
+		s = &lockSlot{sem: make(chan struct{}, 1)}
+		sessionLocks[scope] = s
+	}
+	return s
+}
 
 // acquireSessionLock joins this process's lock on the vault if it holds one;
 // otherwise it polls pg_try_advisory_lock every 100ms until LockTimeout,
@@ -168,9 +189,14 @@ var (
 // crashed writer not yet reaped).
 func (b *backend) acquireSessionLock(ctx context.Context) error {
 	scope := fmt.Sprintf("%s:%d/%d", b.connCfg.Host, b.connCfg.Port, b.session)
-	sessionLocksMu.Lock()
-	defer sessionLocksMu.Unlock()
-	if l := sessionLocks[scope]; l != nil {
+	slot := lockSlotFor(scope)
+	select {
+	case slot.sem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-slot.sem }()
+	if l := slot.held; l != nil {
 		// The lock lives as long as its connection's session. If that
 		// session is gone (pg_terminate_backend, a dropped connection), so
 		// is the lock: forget it and take the lock afresh below, so this
@@ -188,7 +214,7 @@ func (b *backend) acquireSessionLock(ctx context.Context) error {
 			b.lock = l
 			return nil
 		}
-		delete(sessionLocks, scope)
+		slot.held = nil
 	}
 	// Its own one-connection pool, so the lock outlives whichever backend
 	// took it and is released when the last one closes.
@@ -211,8 +237,8 @@ func (b *backend) acquireSessionLock(ctx context.Context) error {
 			return fail(fmt.Errorf("storage: advisory lock: %w", err))
 		}
 		if got {
-			b.lock = &sessionLock{scope: scope, db: db, conn: conn, refs: 1}
-			sessionLocks[scope] = b.lock
+			b.lock = &sessionLock{slot: slot, db: db, conn: conn, refs: 1}
+			slot.held = b.lock
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -231,15 +257,15 @@ func (b *backend) acquireSessionLock(ctx context.Context) error {
 // releaseSessionLock drops this backend's share of the lock; the last one
 // out closes the lock's connection, which releases the lock.
 func (b *backend) releaseSessionLock() error {
-	sessionLocksMu.Lock()
-	defer sessionLocksMu.Unlock()
 	l := b.lock
 	b.lock = nil
+	l.slot.sem <- struct{}{}
+	defer func() { <-l.slot.sem }()
 	if l.refs--; l.refs > 0 {
 		return nil
 	}
-	if sessionLocks[l.scope] == l {
-		delete(sessionLocks, l.scope)
+	if l.slot.held == l {
+		l.slot.held = nil
 	}
 	l.conn.Close()
 	return l.db.Close()

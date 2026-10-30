@@ -116,7 +116,7 @@ type FullPipelineResult struct {
 	ArticlesWritten   int
 	Errors            int
 	EmbedErrors       int
-	SucceededSources  []string // source paths that completed summarization successfully
+	SucceededSources  []string // source paths that summarized successfully and whose concept extraction did not fail
 	// Pass23Completed is true only when Pass 2 (extract) and Pass 3 (write) ran to
 	// the end without a total-extraction failure and without cancellation. Callers
 	// must not mark SucceededSources extracted/written unless this is true, or an
@@ -221,6 +221,10 @@ func runFullPipeline(sources []SourceInfo, opts FullPipelineOpts) *FullPipelineR
 		Budgets:         opts.Budgets,
 	})
 
+	// Each summarized source's manifest entry as it was before this run (nil
+	// when it had none), so a source whose concept extraction fails can be
+	// put back for retry (see the partial-failure branch of Pass 2).
+	priorSources := map[string]*manifest.Source{}
 	for _, sr := range summaries {
 		// A cancelled source (compile interrupted, or its LLM call cancelled mid-
 		// flight) is neither success nor failure. Skip it: don't count an error,
@@ -249,6 +253,11 @@ func runFullPipeline(sources []SourceInfo, opts FullPipelineOpts) *FullPipelineR
 
 		// Update manifest — refresh both Hash and Type so config-driven type
 		// changes propagate on recompile of existing entries.
+		if prev, ok := mf.Sources[sr.SourcePath]; ok {
+			priorSources[sr.SourcePath] = &prev
+		} else {
+			priorSources[sr.SourcePath] = nil
+		}
 		for _, s := range sources {
 			if s.Path == sr.SourcePath {
 				if _, exists := mf.Sources[sr.SourcePath]; !exists {
@@ -319,6 +328,30 @@ func runFullPipeline(sources []SourceInfo, opts FullPipelineOpts) *FullPipelineR
 			// documents, but keep going with the surviving concepts.
 			result.Errors++
 			progress.ItemError("concept extraction (partial)", err)
+			// The skipped sources were summarized but never extracted. Leave
+			// them out of SucceededSources, so no caller marks them extracted
+			// and written, and put their manifest entries back with no hash.
+			// A blank hash matches no file, so the next diff reports each one
+			// modified, and it retries like a failed summary does; or, once
+			// the file is gone, removed, so its summary's search entry and
+			// vector are cleaned up.
+			skipped := make(map[string]bool, len(pfe.Skipped))
+			for _, p := range pfe.Skipped {
+				skipped[p] = true
+				src := mf.Sources[p]
+				if prev := priorSources[p]; prev != nil {
+					src = *prev
+				}
+				src.Hash = ""
+				mf.Sources[p] = src
+			}
+			kept := result.SucceededSources[:0]
+			for _, p := range result.SucceededSources {
+				if !skipped[p] {
+					kept = append(kept, p)
+				}
+			}
+			result.SucceededSources = kept
 		} else {
 			progress.ItemError("concept extraction", err)
 			result.Errors++

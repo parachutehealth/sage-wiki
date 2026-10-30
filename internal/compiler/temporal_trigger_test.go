@@ -571,6 +571,9 @@ func TestFunctionalSupersessionFollowsValidFrom(t *testing.T) {
 				t.Errorf("alice -> %s valid %s, want %s", target, got, want)
 			}
 		}
+		if got := edge(t, ont, "acme").ValidTo; got != "2023-01-01T00:00:00Z" {
+			t.Errorf("acme valid_to = %q, want 2023-01-01T00:00:00Z, its own start", got)
+		}
 	})
 
 	// The edge after the intermediate one is itself superseded already: the

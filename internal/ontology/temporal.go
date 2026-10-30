@@ -74,6 +74,17 @@ func idForms(id string, edges map[string]string) []string {
 	return out
 }
 
+// IDForms is idForms over a list of applied aliases: every ID an entity's
+// edges may be stored under, the forms InvalidateFunctional supersedes
+// across.
+func IDForms(id string, applied []store.EntityAlias) []string {
+	edges := make(map[string]string, len(applied))
+	for _, a := range applied {
+		edges[a.Alias] = a.CanonicalID
+	}
+	return idForms(id, edges)
+}
+
 func (s *Store) appliedAliasEdges() (map[string]string, error) {
 	aliases, err := s.ListAliases(store.AliasApplied)
 	if err != nil {

@@ -215,22 +215,32 @@ func (s *Store) RelationHistory(sourceID, relationType string) ([]Relation, erro
 
 // SetRelationValidTo implements store.OntologyStore. See the interface doc.
 func (s *Store) SetRelationValidTo(id, validTo, invalidatedBy string) error {
+	var changed int64
 	err := s.db.WriteTx(func(tx *sql.Tx) error {
 		for _, table := range []string{"relations", "derived_relations"} {
 			if table == "derived_relations" && !s.derivedExistsFresh() {
 				continue
 			}
-			if _, err := tx.Exec(`UPDATE `+table+` SET valid_to = ?, invalidated_by = ? WHERE id = ?`,
-				validTo, invalidatedBy, id); err != nil {
+			res, err := tx.Exec(`UPDATE `+table+` SET valid_to = ?, invalidated_by = ?
+				WHERE id = ? AND (COALESCE(valid_to,'') = '' OR valid_to > ?)`,
+				validTo, invalidatedBy, id, validTo)
+			if err != nil {
 				return fmt.Errorf("ontology.SetRelationValidTo: update %s: %w", table, err)
 			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("ontology.SetRelationValidTo: update %s: %w", table, err)
+			}
+			changed += n
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	s.emitEdgeInvalidated(id, invalidatedBy, parseValid(validTo))
+	if changed > 0 {
+		s.emitEdgeInvalidated(id, invalidatedBy, parseValid(validTo))
+	}
 	return nil
 }
 

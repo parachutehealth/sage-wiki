@@ -94,10 +94,10 @@ type OntologyStore interface {
 	RelationHistory(sourceID, relationType string) ([]Relation, error)
 	// SetRelationValidTo sets valid_to and invalidated_by on the edge with
 	// this ID, in relations or derived_relations (a derived copy has its own
-	// ID), in one transaction.
-	// Unlike InvalidateFunctional it also rewrites an edge that is already
-	// closed, which is how an edge arriving between two others shortens the
-	// earlier one.
+	// ID), in one transaction, when the edge is open or ends after validTo:
+	// it shortens an edge and never lengthens one. Unlike
+	// InvalidateFunctional it also shortens an edge that is already closed,
+	// which is how an edge arriving between two others ends the earlier one.
 	SetRelationValidTo(id, validTo, invalidatedBy string) error
 	Traverse(entityID string, opts TraverseOpts) ([]Entity, error)
 	DetectCycles(entityID string) ([][]string, error)

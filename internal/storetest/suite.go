@@ -1927,6 +1927,10 @@ func RelationHistoryConformance(new BackendFactory) func(*testing.T) {
 		if err := os.SetRelationValidTo(copied, "2024-01-01T00:00:00Z", "r-y"); err != nil {
 			t.Fatal(err)
 		}
+		// It never lengthens: a later end leaves r-x where it is.
+		if err := os.SetRelationValidTo("r-x", "2025-01-01T00:00:00Z", "r-y"); err != nil {
+			t.Fatal(err)
+		}
 		hist, err = os.RelationHistory("s", "works_at")
 		if err != nil {
 			t.Fatal(err)

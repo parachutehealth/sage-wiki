@@ -562,6 +562,13 @@ func persistGraph(ont store.OntologyStore, g ExtractedGraph, concepts []Extracte
 			continue
 		}
 		relations++
+		if later != nil {
+			// AddRelation leaves valid_to alone on an edge already written, so an
+			// edge recompiled after a later one arrived is ended here too.
+			if err := ont.SetRelationValidTo(edgeID, later.ValidFrom, later.ID); err != nil {
+				log.Warn("triples: ending the edge at the later one failed", "edge", edgeID, "error", err)
+			}
+		}
 		for _, e := range earlier {
 			if err := ont.SetRelationValidTo(e.ID, validFrom, edgeID); err != nil {
 				log.Warn("triples: shortening an earlier edge failed", "edge", e.ID, "error", err)

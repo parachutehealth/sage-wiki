@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -505,6 +506,26 @@ func TestFunctionalSupersessionFollowsValidFrom(t *testing.T) {
 		}
 		if targets := liveTargets(t, ont, "alice"); len(targets) != 1 || targets[0] != "initech" {
 			t.Errorf("live targets = %v, want [initech]; the derived copy of the alias edge must close too", targets)
+		}
+	})
+
+	// The intermediate edge was written live below the threshold, then
+	// re-extracted above it: the existing row ends where the later edge starts.
+	t.Run("intermediate edge re-extracted above the threshold", func(t *testing.T) {
+		ont, ts := temporalTestStores(t)
+		dir := t.TempDir()
+		runDatedDoc(t, ont, ts, temporalCfg(), worksAtInitech, dir, "raw/y.md", "2024-01-01")
+		low := strings.Replace(globex("alice"), `"confidence":0.9`, `"confidence":0.5`, 1)
+		runDatedDoc(t, ont, ts, temporalCfg(), low, dir, "raw/z.md", "2023-01-01")
+		if got := interval(t, ont, "alice", "globex"); got != "2023-" {
+			t.Fatalf("setup: alice -> globex valid %s, want open below the threshold", got)
+		}
+		runDatedDoc(t, ont, ts, temporalCfg(), globex("alice"), dir, "raw/z.md", "2023-01-01")
+
+		for target, want := range map[string]string{"globex": "2023-2024", "initech": "2024-"} {
+			if got := interval(t, ont, "alice", target); got != want {
+				t.Errorf("alice -> %s valid %s, want %s", target, got, want)
+			}
 		}
 	})
 

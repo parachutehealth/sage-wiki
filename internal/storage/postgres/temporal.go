@@ -176,22 +176,32 @@ func (s *ontologyStore) RelationHistory(sourceID, relationType string) ([]store.
 
 // SetRelationValidTo implements store.OntologyStore. See the interface doc.
 func (s *ontologyStore) SetRelationValidTo(id, validTo, invalidatedBy string) error {
+	var changed int64
 	err := s.b.WriteTx(func(tx *sql.Tx) error {
 		for _, table := range []string{"relations", "derived_relations"} {
 			if table == "derived_relations" && !s.b.derivedExistsFresh() {
 				continue
 			}
-			if _, err := tx.Exec(`UPDATE `+table+` SET valid_to = $1, invalidated_by = $2 WHERE id = $3`,
-				nullStr(validTo), nullStr(invalidatedBy), id); err != nil {
+			res, err := tx.Exec(`UPDATE `+table+` SET valid_to = $1, invalidated_by = $2
+				WHERE id = $3 AND (COALESCE(valid_to,'') = '' OR valid_to > $1)`,
+				nullStr(validTo), nullStr(invalidatedBy), id)
+			if err != nil {
 				return fmt.Errorf("postgres.SetRelationValidTo: update %s: %w", table, err)
 			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("postgres.SetRelationValidTo: update %s: %w", table, err)
+			}
+			changed += n
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	ontology.EmitEdgeInvalidated(s.sink, id, invalidatedBy, nil, parseValidStamp(validTo))
+	if changed > 0 {
+		ontology.EmitEdgeInvalidated(s.sink, id, invalidatedBy, nil, parseValidStamp(validTo))
+	}
 	return nil
 }
 

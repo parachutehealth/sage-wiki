@@ -203,13 +203,14 @@ func (b *backend) acquireSessionLock(ctx context.Context) error {
 		// open cannot join a lock another process may now hold.
 		// The probe gets its own deadline, not the caller's: a deadline that
 		// fires mid-query makes pgx close the connection, which ends the
-		// session and releases the lock. Any probe failure therefore means
-		// the lock is gone.
+		// session and releases the lock. A failed probe on a connection pgx
+		// still holds open (a cancelled statement, say) left the session,
+		// and the lock, alive.
 		probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		var one int
 		err := l.conn.QueryRowContext(probeCtx, "SELECT 1").Scan(&one)
 		cancel()
-		if err == nil {
+		if err == nil || lockConnOpen(l.conn) {
 			l.refs++
 			b.lock = l
 			return nil
@@ -252,6 +253,21 @@ func (b *backend) acquireSessionLock(ctx context.Context) error {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// lockConnOpen reports whether pgx still holds the lock's connection open.
+// pgx closes it when the session ends (pg_terminate_backend, a dropped
+// connection, a deadline mid-query), and a server error such as a cancelled
+// statement leaves it open, along with the session and its lock.
+func lockConnOpen(c *sql.Conn) bool {
+	open := false
+	err := c.Raw(func(dc any) error {
+		if sc, ok := dc.(*stdlib.Conn); ok {
+			open = !sc.Conn().IsClosed()
+		}
+		return nil
+	})
+	return err == nil && open
 }
 
 // releaseSessionLock drops this backend's share of the lock; the last one

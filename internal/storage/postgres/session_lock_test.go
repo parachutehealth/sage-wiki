@@ -167,3 +167,44 @@ func TestSessionLockWaitIsPerVault(t *testing.T) {
 		t.Fatalf("writer open on the busy vault: err = %v, want ErrWriterActive", err)
 	}
 }
+
+// TestLockConnOpen: a server error on the lock's connection keeps the
+// session, and the lock, so the process's next writer must join it; a
+// terminated session must not be joined.
+func TestLockConnOpen(t *testing.T) {
+	vault, _ := lockTestVault(t)
+	db, err := sql.Open("pgx", vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	var n int
+	if err := conn.QueryRowContext(ctx, "SELECT 1/0").Scan(&n); err == nil {
+		t.Fatal("SELECT 1/0 succeeded")
+	}
+	if !lockConnOpen(conn) {
+		t.Error("connection reported closed after a server error; its session is alive")
+	}
+
+	var pid int
+	if err := conn.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	var terminated bool
+	if err := db.QueryRowContext(ctx, "SELECT pg_terminate_backend($1, 5000)", pid).Scan(&terminated); err != nil || !terminated {
+		t.Fatalf("terminate the session: %v (terminated %v)", err, terminated)
+	}
+	if err := conn.QueryRowContext(ctx, "SELECT 1").Scan(&n); err == nil {
+		t.Fatal("SELECT 1 succeeded on a terminated session")
+	}
+	if lockConnOpen(conn) {
+		t.Error("connection reported open after its session was terminated")
+	}
+}

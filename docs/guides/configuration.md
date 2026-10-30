@@ -166,6 +166,12 @@ compiler:
   # auto_promote: true         # promote to tier 3 based on query hits
   # auto_demote: true          # demote stale articles
   # split_threshold: 15000     # chars — split large docs for faster writing
+  # max_source_context_tokens: 100000 # estimated-token budget for one article's source
+                              # context; the highest-ranked part is always kept
+  # source_part_max_chars: 4000 # bytes the write pass keeps of each source part (a
+                              # whole source under split_threshold, or one section of
+                              # a split source); 0 keeps parts whole, so only
+                              # max_source_context_tokens bounds the context
   # dedup_threshold: 0.85      # cosine similarity for concept dedup
   # dedup_strategy: embedding  # embedding (default) | llm — the llm strategy runs a
                               # global keep/fold/drop curation pass over the whole

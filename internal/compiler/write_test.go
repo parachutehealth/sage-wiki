@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/xoai/sage-wiki/internal/config"
 	"github.com/xoai/sage-wiki/internal/manifest"
 	"github.com/xoai/sage-wiki/internal/ontology"
 	"github.com/xoai/sage-wiki/internal/storage"
@@ -653,7 +655,7 @@ func TestBuildSourceContext_BudgetCap(t *testing.T) {
 	// Budget of 20000 tokens (~80K chars). Each source contributes ~1500 chars
 	// across 3 matching sections (~375 tokens). 50 sources = ~18750 tokens
 	// — just under. Tighten to force truncation.
-	ctx := buildSourceContext(dir, concept, 5000, 5000)
+	ctx := buildSourceContext(dir, concept, 5000, 5000, 0)
 	if ctx == "" {
 		t.Fatal("budget-capped context is empty")
 	}
@@ -674,7 +676,7 @@ func TestBuildSourceContext_RelevanceOrdering(t *testing.T) {
 		concept.Sources = append(concept.Sources, makeMockSource(t, dir, fmt.Sprintf("pad-%03d.md", i), "barium", 1, 2))
 	}
 	// Small budget: should keep high-relevance source preferentially
-	ctx := buildSourceContext(dir, concept, 5000, 3000)
+	ctx := buildSourceContext(dir, concept, 5000, 3000, 0)
 	if !strings.Contains(ctx, "high.md") {
 		t.Fatal("high-relevance source dropped under budget pressure")
 	}
@@ -686,7 +688,7 @@ func TestBuildSourceContext_AlwaysNonEmpty(t *testing.T) {
 		Name:    "barium",
 		Sources: []string{makeMockSource(t, dir, "only.md", "barium", 1, 1)},
 	}
-	ctx := buildSourceContext(dir, concept, 5000, 1)
+	ctx := buildSourceContext(dir, concept, 5000, 1, 0)
 	if ctx == "" {
 		t.Fatal("budget=1 produced empty context")
 	}
@@ -699,10 +701,83 @@ func TestBuildSourceContext_Defaulting(t *testing.T) {
 		Sources: []string{makeMockSource(t, dir, "only.md", "barium", 1, 1)},
 	}
 	// maxTokens=0 should use the default (not unbounded)
-	ctx := buildSourceContext(dir, concept, 5000, 0)
+	ctx := buildSourceContext(dir, concept, 5000, 0, 0)
 	if ctx == "" {
 		t.Fatal("defaulting produced empty context")
 	}
+}
+
+// TestBuildSourceContext_SourcePartMaxChars: compiler.source_part_max_chars
+// sets the per-part cut for a whole small source and for each section of a
+// split one. Unset keeps the historical 4000; an explicit 0 keeps parts whole.
+func TestBuildSourceContext_SourcePartMaxChars(t *testing.T) {
+	const marker = "[...truncated...]"
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return name
+	}
+	// 7,000 bytes, under the 15,000 split threshold, with the concept named
+	// only past byte 4,000 (as the Olympics home page names Cowboy at 7,594).
+	small := write("small.md", "# Home\n\n"+strings.Repeat("a", 6000)+"\nCowboy joined Olympics.\n"+strings.Repeat("b", 970))
+	// 20,000 bytes, so it is split; its one matching section is 6,000 bytes,
+	// with its last sentence past byte 4,000 of the section.
+	split := write("split.md", "## Pad one\n\n"+strings.Repeat("p", 7000)+
+		"\n\n## Cowboy\n\nCowboy is part of Olympics.\n"+strings.Repeat("c", 5900)+"\nCOWBOY-SECTION-END\n"+
+		"\n\n## Pad two\n\n"+strings.Repeat("q", 7000))
+	// Multibyte text whose 4,000th byte falls inside a rune.
+	runes := write("runes.md", "x"+strings.Repeat("é", 3000))
+
+	cfgCap := func(v *int) int {
+		return config.CompilerConfig{SourcePartMaxChars: v}.SourcePartMaxCharsOrDefault()
+	}
+	zero, raised, low := 0, 10000, 500
+
+	tests := []struct {
+		name     string
+		source   string
+		partCap  int
+		want     []string
+		dontWant []string
+	}{
+		{"default cuts a small source at 4000", small, cfgCap(nil), []string{marker}, []string{"Cowboy joined Olympics."}},
+		{"zero keeps a small source whole", small, cfgCap(&zero), []string{"Cowboy joined Olympics."}, []string{marker}},
+		{"raised cap keeps a small source whole", small, cfgCap(&raised), []string{"Cowboy joined Olympics."}, []string{marker}},
+		{"default cuts a split section at 4000", split, cfgCap(nil), []string{"Cowboy is part of Olympics.", marker}, []string{"COWBOY-SECTION-END"}},
+		{"raised cap keeps a split section whole", split, cfgCap(&raised), []string{"COWBOY-SECTION-END"}, []string{marker}},
+		{"low cap cuts a split section", split, cfgCap(&low), []string{"Cowboy is part of Olympics.", marker}, []string{"COWBOY-SECTION-END"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := buildSourceContext(dir, ExtractedConcept{Name: "cowboy", Sources: []string{tc.source}}, 15000, 100000, tc.partCap)
+			for _, w := range tc.want {
+				if !strings.Contains(ctx, w) {
+					t.Errorf("context lacks %q", w)
+				}
+			}
+			for _, w := range tc.dontWant {
+				if strings.Contains(ctx, w) {
+					t.Errorf("context has %q", w)
+				}
+			}
+			// Only the matching section of the split source is included.
+			if tc.source == split && strings.Contains(ctx, "Pad two") {
+				t.Error("context includes a non-matching section")
+			}
+		})
+	}
+
+	t.Run("cut lands on a rune boundary", func(t *testing.T) {
+		ctx := buildSourceContext(dir, ExtractedConcept{Name: "x", Sources: []string{runes}}, 15000, 100000, cfgCap(nil))
+		if !utf8.ValidString(ctx) {
+			t.Fatal("truncated context is not valid UTF-8")
+		}
+		if !strings.Contains(ctx, marker) {
+			t.Fatal("context was not cut")
+		}
+	})
 }
 
 // Issue #165: sources whose paths differ only in punctuation (`.`, space,

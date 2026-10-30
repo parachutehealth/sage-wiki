@@ -197,6 +197,7 @@ func ReExtract(projectDir string, options ...ReExtractOption) (*CompileResult, e
 			Language:               cfg.Language,
 			AntiPatternPhrases:     cfg.Compiler.AntiPatternPhrasesOrDefault(),
 			MaxSourceContextTokens: cfg.Compiler.MaxSourceContextTokensOrDefault(),
+			SourcePartMaxChars:     cfg.Compiler.SourcePartMaxCharsOrDefault(),
 			AllConcepts:            manifestConceptRefs(mf.Concepts),
 		}, concepts)
 

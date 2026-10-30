@@ -239,6 +239,23 @@ compiler:
 The summarize pass still sees the full document (for cross-section
 awareness). Only the write pass receives targeted sections.
 
+The write pass also cuts each part it receives, a whole source under the
+threshold or one matching section of a split source, to
+`source_part_max_chars` bytes (default 4,000), and logs each cut at WARN
+("write pass: source part truncated", with the concept, the source and the
+bytes dropped). A fact past the cut reaches the summaries and the graph but
+not the article. `max_source_context_tokens` (default 100,000) bounds the
+whole context, keeping the highest-ranked parts first:
+
+```yaml
+compiler:
+  source_part_max_chars: 16000     # bytes per part; 0 = no per-part cap
+  max_source_context_tokens: 100000
+```
+
+Raising the cap raises the write model's input tokens by up to the extra
+bytes divided by four, per article and per part.
+
 ## Concept Deduplication
 
 At scale (100K documents, 300K+ concepts), duplicates accumulate. An

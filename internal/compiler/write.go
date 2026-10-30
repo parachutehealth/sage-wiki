@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xoai/sage-wiki/internal/embed"
 	"github.com/xoai/sage-wiki/internal/extract"
@@ -61,6 +62,7 @@ type ArticleWriteOpts struct {
 	ChunkOverlap           int // tokens of overlap between adjacent chunks (default 0)
 	SplitThreshold         int // chars — enable section-aware writing above this (default 15000)
 	MaxSourceContextTokens int // max estimated tokens in assembled source context (default 100000)
+	SourcePartMaxChars     int // bytes kept per source part in the write context: 0 → 4000 (default), < 0 → no cap
 	Language               string
 	Backpressure           *BackpressureController // optional; if nil, uses fixed semaphore
 	Prompts                *prompts.Registry       // optional; nil = prompts package default
@@ -221,7 +223,7 @@ func prepareArticle(opts ArticleWriteOpts, concept ExtractedConcept, aliasMap ma
 	}
 
 	// Build source context from relevant sections (document splitting)
-	sourceContext := buildSourceContext(opts.ProjectDir, concept, opts.SplitThreshold, opts.MaxSourceContextTokens)
+	sourceContext := buildSourceContext(opts.ProjectDir, concept, opts.SplitThreshold, opts.MaxSourceContextTokens, opts.SourcePartMaxChars)
 
 	// Build prompt. relatedNames are real, co-occurring concept slugs (issue
 	// #106) that resolve to existing article files and survive the strip pass.
@@ -1069,6 +1071,8 @@ func StripBrokenWikilinks(projectDir, outputDir string, memStore store.EntryStor
 // buildSourceContext reads source files for a concept, splits large ones
 // by headings, and returns the relevant sections as context for article writing.
 // For small sources (below threshold), includes the full content.
+// Each part (a whole small source, or one section of a large one) is cut at
+// partMaxChars bytes: 0 means the default 4000, negative means no cap.
 // Returns empty string if no sources can be read.
 type sourcePart struct {
 	text          string
@@ -1077,12 +1081,15 @@ type sourcePart struct {
 	sectionOffset int
 }
 
-func buildSourceContext(projectDir string, concept ExtractedConcept, threshold int, maxTokens int) string {
+func buildSourceContext(projectDir string, concept ExtractedConcept, threshold int, maxTokens int, partMaxChars int) string {
 	if threshold <= 0 {
 		threshold = 15000 // default from spec
 	}
 	if maxTokens <= 0 {
 		maxTokens = 100000
+	}
+	if partMaxChars == 0 {
+		partMaxChars = 4000
 	}
 
 	terms := append([]string{concept.Name, ontology.FormatConceptName(concept.Name)}, concept.Aliases...)
@@ -1100,9 +1107,7 @@ func buildSourceContext(projectDir string, concept ExtractedConcept, threshold i
 		sections := extract.SplitByHeadings(content, threshold)
 		if len(sections) <= 1 {
 			// Small doc or no headings — include as-is (truncated)
-			if len(content) > 4000 {
-				content = content[:4000] + "\n[...truncated...]"
-			}
+			content = capSourcePart(content, partMaxChars, concept.Name, srcPath)
 			parts = append(parts, sourcePart{
 				text:          fmt.Sprintf("### Source: %s\n\n%s", srcPath, content),
 				matchCount:    1,
@@ -1128,10 +1133,7 @@ func buildSourceContext(projectDir string, concept ExtractedConcept, threshold i
 			if s.Heading != "" {
 				header = srcPath + " > " + s.Heading
 			}
-			text := s.Content
-			if len(text) > 4000 {
-				text = text[:4000] + "\n[...truncated...]"
-			}
+			text := capSourcePart(s.Content, partMaxChars, concept.Name, header)
 			parts = append(parts, sourcePart{
 				text:          fmt.Sprintf("### Source: %s\n\n%s", header, text),
 				matchCount:    matchCount,
@@ -1185,6 +1187,26 @@ func buildSourceContext(projectDir string, concept ExtractedConcept, threshold i
 	// document can't close the write_article template's untrusted frame
 	// early (SEC-04, site 5 — the template wraps this whole string).
 	return prompts.NeutralizeTags(strings.Join(kept, "\n\n---\n\n"))
+}
+
+// capSourcePart cuts one source part to maxChars bytes, backing off to a
+// UTF-8 boundary, and marks the cut. maxChars < 0 disables the cap. A cut is
+// logged at WARN so a run shows what the write model did not see.
+func capSourcePart(text string, maxChars int, concept, source string) string {
+	if maxChars < 0 || len(text) <= maxChars {
+		return text
+	}
+	cut := maxChars
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	log.Warn("write pass: source part truncated",
+		"concept", concept,
+		"source", source,
+		"bytes", len(text),
+		"bytes_dropped", len(text)-cut,
+		"source_part_max_chars", maxChars)
+	return text[:cut] + "\n[...truncated...]"
 }
 
 // RetryArticle re-writes ONE article from scratch (issue #144 blocking

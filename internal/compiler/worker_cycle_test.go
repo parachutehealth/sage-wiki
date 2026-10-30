@@ -351,6 +351,12 @@ func TestWorker_FailedExtractBatchSourceRemoved(t *testing.T) {
 	if b, _ := h.items.GetByPath("raw/b.md"); b == nil || b.Status != "pending" {
 		t.Fatalf("setup: b.md after cycle 1 = %+v, want pending", b)
 	}
+	if e, _ := h.backend.Entries().Get("raw/b.md"); e == nil {
+		t.Fatal("setup: b.md's summary has no search entry after cycle 1")
+	}
+	if v, _ := h.backend.Vectors().Get("raw/b.md"); v == nil {
+		t.Fatal("setup: b.md's summary has no vector after cycle 1")
+	}
 
 	if err := os.Remove(filepath.Join(h.dir, "raw", "b.md")); err != nil {
 		t.Fatal(err)
@@ -361,6 +367,12 @@ func TestWorker_FailedExtractBatchSourceRemoved(t *testing.T) {
 	}
 	if b, _ := h.items.GetByPath("raw/b.md"); b != nil {
 		t.Errorf("b.md after its file was deleted: queue row %+v still present, want it dropped", b)
+	}
+	if e, _ := h.backend.Entries().Get("raw/b.md"); e != nil {
+		t.Error("b.md's search entry survived its file's deletion")
+	}
+	if v, _ := h.backend.Vectors().Get("raw/b.md"); v != nil {
+		t.Error("b.md's vector survived its file's deletion")
 	}
 }
 

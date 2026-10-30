@@ -556,6 +556,23 @@ func TestFunctionalSupersessionFollowsValidFrom(t *testing.T) {
 		}
 	})
 
+	// The intermediate edge has the same date as the earlier one: the later
+	// compiled wins, as with equal dates and no later edge, so the earlier
+	// one never held.
+	t.Run("intermediate edge dated like the earlier one", func(t *testing.T) {
+		ont, ts := temporalTestStores(t)
+		dir := t.TempDir()
+		runDatedDoc(t, ont, ts, temporalCfg(), acme("alice"), dir, "raw/x.md", "2023-01-01")
+		runDatedDoc(t, ont, ts, temporalCfg(), worksAtInitech, dir, "raw/z.md", "2024-01-01")
+		runDatedDoc(t, ont, ts, temporalCfg(), globex("alice"), dir, "raw/y.md", "2023-01-01")
+
+		for target, want := range map[string]string{"acme": "2023-2023", "globex": "2023-2024", "initech": "2024-"} {
+			if got := interval(t, ont, "alice", target); got != want {
+				t.Errorf("alice -> %s valid %s, want %s", target, got, want)
+			}
+		}
+	})
+
 	// The edge after the intermediate one is itself superseded already: the
 	// intermediate edge still ends where that one starts, not at the edge
 	// that is current now.

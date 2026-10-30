@@ -683,9 +683,11 @@ func laterFunctionalWinners(ont store.OntologyStore, r ExtractedRelation, validF
 // source, excluding edges to any form of r's own target. later is the
 // earliest edge that starts after validFrom, cleared threshold and was ever
 // live (one closed at its own start never held), live now or not: in date
-// order it would have superseded r. earlier are the edges that start before
-// validFrom and are still live at it: in date order r would have ended them
-// there. Equal dates are in neither, so they keep the compile-order rule.
+// order it would have superseded r. earlier are the edges that start at or
+// before validFrom and are still live at it: in date order r would have
+// ended them there. One that starts on the same date ends at its own start,
+// so of two edges dated alike the later compiled wins, as with
+// InvalidateFunctional.
 func functionalNeighbours(ont store.OntologyStore, r ExtractedRelation, validFrom string, threshold float64) (later *store.Relation, earlier []store.Relation, err error) {
 	applied, err := ont.ListAliases(store.AliasApplied)
 	if err != nil {
@@ -712,7 +714,7 @@ func functionalNeighbours(ont store.OntologyStore, r ExtractedRelation, validFro
 					h := h
 					later = &h
 				}
-			case h.ValidFrom < validFrom && (h.ValidTo == "" || h.ValidTo > validFrom):
+			case h.ValidFrom <= validFrom && (h.ValidTo == "" || h.ValidTo > validFrom):
 				earlier = append(earlier, h)
 			}
 		}

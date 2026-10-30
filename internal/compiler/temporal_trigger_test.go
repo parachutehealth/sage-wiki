@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -282,7 +283,7 @@ func runDatedDoc(t *testing.T, ont store.OntologyStore, ts store.TrustStore, cfg
 	}
 	srv := graphServer(t, graph)
 	_, sup, _ := ExtractTriplesPass(context.Background(), ont,
-		[]SummaryResult{{SourcePath: doc, Summary: "Alice works at Acme. Alice works at Initech. Alice works at Globex."}}, nil,
+		[]SummaryResult{{SourcePath: doc, Summary: "Alice works at Acme. Alice works at Initech. Alice works at Globex. Alice works at Hooli."}}, nil,
 		cfg, triplesClient(t, srv.URL), false, projectDir, nil, ts, nil, nil, nil)
 	return sup
 }
@@ -468,6 +469,128 @@ func TestFunctionalSupersessionFollowsValidFrom(t *testing.T) {
 
 		if initech := edge(t, ont, "initech"); initech.ValidTo != "" {
 			t.Errorf("newer edge was closed after a failed lookup: valid_to %q", initech.ValidTo)
+		}
+	})
+
+	// interval returns the alice-or-alias -> target edge's [from, to) as dates.
+	interval := func(t *testing.T, ont *ontology.Store, source, target string) string {
+		t.Helper()
+		all, err := ont.AllRelations()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range all {
+			if r.SourceID == source && r.TargetID == target {
+				short := func(v string) string {
+					if len(v) >= 4 {
+						return v[:4]
+					}
+					return v
+				}
+				return short(r.ValidFrom) + "-" + short(r.ValidTo)
+			}
+		}
+		t.Fatalf("no %s -> %s edge", source, target)
+		return ""
+	}
+	acme := func(source string) string { return worksAt(source, "acme", "Alice works at Acme.") }
+	globex := func(source string) string { return worksAt(source, "globex", "Alice works at Globex.") }
+
+	// X (2022) and Y (2024) are written, then Z (2023) arrives between them:
+	// X must end where Z starts, as in date order, not where Y starts.
+	t.Run("intermediate edge shortens the earlier one", func(t *testing.T) {
+		ont, ts := temporalTestStores(t)
+		dir := t.TempDir()
+		runDatedDoc(t, ont, ts, temporalCfg(), acme("alice"), dir, "raw/x.md", "2022-01-01")
+		runDatedDoc(t, ont, ts, temporalCfg(), worksAtInitech, dir, "raw/y.md", "2024-01-01")
+		runDatedDoc(t, ont, ts, temporalCfg(), globex("alice"), dir, "raw/z.md", "2023-01-01")
+
+		for target, want := range map[string]string{"acme": "2022-2023", "globex": "2023-2024", "initech": "2024-"} {
+			if got := interval(t, ont, "alice", target); got != want {
+				t.Errorf("alice -> %s valid %s, want %s", target, got, want)
+			}
+		}
+	})
+
+	// The earlier edge is still open because it was written under an alias
+	// form the later edge couldn't see; the intermediate edge closes it.
+	t.Run("intermediate edge closes an earlier one still open", func(t *testing.T) {
+		ont, ts := temporalTestStores(t)
+		dir := t.TempDir()
+		runDatedDoc(t, ont, ts, temporalCfg(), acme("alice_alias"), dir, "raw/x.md", "2022-01-01")
+		runDatedDoc(t, ont, ts, temporalCfg(), worksAtInitech, dir, "raw/y.md", "2024-01-01")
+		if got := interval(t, ont, "alice_alias", "acme"); got != "2022-" {
+			t.Fatalf("setup: alice_alias -> acme valid %s, want still open", got)
+		}
+		link(t, ont, "alice_alias")
+		runDatedDoc(t, ont, ts, temporalCfg(), globex("alice"), dir, "raw/z.md", "2023-01-01")
+
+		if got := interval(t, ont, "alice_alias", "acme"); got != "2022-2023" {
+			t.Errorf("alice_alias -> acme valid %s, want 2022-2023", got)
+		}
+		if got := interval(t, ont, "alice", "globex"); got != "2023-2024" {
+			t.Errorf("alice -> globex valid %s, want 2023-2024", got)
+		}
+		if targets := liveTargets(t, ont, "alice"); len(targets) != 1 || targets[0] != "initech" {
+			t.Errorf("live targets = %v, want [initech]; the derived copy of the alias edge must close too", targets)
+		}
+	})
+
+	// The intermediate edge was written live below the threshold, then
+	// re-extracted above it: the existing row ends where the later edge starts.
+	t.Run("intermediate edge re-extracted above the threshold", func(t *testing.T) {
+		ont, ts := temporalTestStores(t)
+		dir := t.TempDir()
+		runDatedDoc(t, ont, ts, temporalCfg(), worksAtInitech, dir, "raw/y.md", "2024-01-01")
+		low := strings.Replace(globex("alice"), `"confidence":0.9`, `"confidence":0.5`, 1)
+		runDatedDoc(t, ont, ts, temporalCfg(), low, dir, "raw/z.md", "2023-01-01")
+		if got := interval(t, ont, "alice", "globex"); got != "2023-" {
+			t.Fatalf("setup: alice -> globex valid %s, want open below the threshold", got)
+		}
+		runDatedDoc(t, ont, ts, temporalCfg(), globex("alice"), dir, "raw/z.md", "2023-01-01")
+
+		for target, want := range map[string]string{"globex": "2023-2024", "initech": "2024-"} {
+			if got := interval(t, ont, "alice", target); got != want {
+				t.Errorf("alice -> %s valid %s, want %s", target, got, want)
+			}
+		}
+	})
+
+	// The intermediate edge has the same date as the earlier one: the later
+	// compiled wins, as with equal dates and no later edge, so the earlier
+	// one never held.
+	t.Run("intermediate edge dated like the earlier one", func(t *testing.T) {
+		ont, ts := temporalTestStores(t)
+		dir := t.TempDir()
+		runDatedDoc(t, ont, ts, temporalCfg(), acme("alice"), dir, "raw/x.md", "2023-01-01")
+		runDatedDoc(t, ont, ts, temporalCfg(), worksAtInitech, dir, "raw/z.md", "2024-01-01")
+		runDatedDoc(t, ont, ts, temporalCfg(), globex("alice"), dir, "raw/y.md", "2023-01-01")
+
+		for target, want := range map[string]string{"acme": "2023-2023", "globex": "2023-2024", "initech": "2024-"} {
+			if got := interval(t, ont, "alice", target); got != want {
+				t.Errorf("alice -> %s valid %s, want %s", target, got, want)
+			}
+		}
+		if got := edge(t, ont, "acme").ValidTo; got != "2023-01-01T00:00:00Z" {
+			t.Errorf("acme valid_to = %q, want 2023-01-01T00:00:00Z, its own start", got)
+		}
+	})
+
+	// The edge after the intermediate one is itself superseded already: the
+	// intermediate edge still ends where that one starts, not at the edge
+	// that is current now.
+	t.Run("intermediate edge ends at the next edge even when it is closed", func(t *testing.T) {
+		ont, ts := temporalTestStores(t)
+		dir := t.TempDir()
+		runDatedDoc(t, ont, ts, temporalCfg(), acme("alice"), dir, "raw/x.md", "2022-01-01")
+		runDatedDoc(t, ont, ts, temporalCfg(), worksAtInitech, dir, "raw/y.md", "2024-01-01")
+		runDatedDoc(t, ont, ts, temporalCfg(), worksAt("alice", "hooli", "Alice works at Hooli."), dir, "raw/w.md", "2025-01-01")
+		runDatedDoc(t, ont, ts, temporalCfg(), globex("alice"), dir, "raw/z.md", "2023-01-01")
+
+		for target, want := range map[string]string{"acme": "2022-2023", "globex": "2023-2024", "initech": "2024-2025", "hooli": "2025-"} {
+			if got := interval(t, ont, "alice", target); got != want {
+				t.Errorf("alice -> %s valid %s, want %s", target, got, want)
+			}
 		}
 	})
 

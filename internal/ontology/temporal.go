@@ -197,6 +197,56 @@ func (s *Store) InvalidateFunctional(sourceID, predicate, keepTargetID, newValid
 	return invalidated, nil
 }
 
+// RelationHistory implements store.OntologyStore. See the interface doc.
+func (s *Store) RelationHistory(sourceID, relationType string) ([]Relation, error) {
+	q := `SELECT ` + relationCols + ` FROM relations WHERE source_id=? AND relation=?`
+	args := []any{sourceID, relationType}
+	if s.derivedExists() {
+		q += "\nUNION ALL" + derivedArm(`d.source_id=? AND d.relation=?`)
+		args = append(args, sourceID, relationType)
+	}
+	rows, err := s.db.ReadDB().Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ontology.RelationHistory: %w", err)
+	}
+	defer rows.Close()
+	return scanRelations(rows)
+}
+
+// SetRelationValidTo implements store.OntologyStore. See the interface doc.
+func (s *Store) SetRelationValidTo(id, validTo, invalidatedBy string) error {
+	if validTo == "" {
+		return fmt.Errorf("ontology.SetRelationValidTo: empty validTo for %s would reopen the edge", id)
+	}
+	var changed int64
+	err := s.db.WriteTx(func(tx *sql.Tx) error {
+		for _, table := range []string{"relations", "derived_relations"} {
+			if table == "derived_relations" && !s.derivedExistsFresh() {
+				continue
+			}
+			res, err := tx.Exec(`UPDATE `+table+` SET valid_to = ?, invalidated_by = ?
+				WHERE id = ? AND (COALESCE(valid_to,'') = '' OR valid_to > ?)`,
+				validTo, invalidatedBy, id, validTo)
+			if err != nil {
+				return fmt.Errorf("ontology.SetRelationValidTo: update %s: %w", table, err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("ontology.SetRelationValidTo: update %s: %w", table, err)
+			}
+			changed += n
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if changed > 0 {
+		s.emitEdgeInvalidated(id, invalidatedBy, parseValid(validTo))
+	}
+	return nil
+}
+
 func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }

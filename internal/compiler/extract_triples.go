@@ -541,22 +541,23 @@ func persistGraph(ont store.OntologyStore, g ExtractedGraph, concepts []Extracte
 			SourceDoc:  sourceDoc,
 			ValidFrom:  validFrom,
 		}
-		// A functional edge dated before a live edge that already superseded
-		// on the same source and predicate does not replace it: it is written
-		// as history, closed where that edge starts, as it would have been had
-		// the sources compiled in date order.
+		// A functional edge is placed in the predicate's history by date, as
+		// if the sources had compiled in date order: it ends where the next
+		// edge that superseded starts (and then replaces nothing current), and
+		// every competing edge it finds live at its own start ends there.
 		var later *store.Relation
+		var earlier []store.Relation
 		if hooks.enabled && hooks.functional[r.Predicate] && r.Confidence >= hooks.threshold && validFrom != "" {
-			winners, err := laterFunctionalWinners(ont, r, validFrom, hooks.threshold)
+			var err error
+			later, earlier, err = functionalNeighbours(ont, r, validFrom, hooks.threshold)
 			if err != nil {
 				// Written blind, the edge could close a newer one; skip it as a
 				// failed write is skipped.
-				log.Warn("triples: relation skipped — later-edge lookup failed",
+				log.Warn("triples: relation skipped — edge history lookup failed",
 					"source", r.Source, "predicate", r.Predicate, "target", r.Target, "error", err)
 				continue
 			}
-			if len(winners) > 0 {
-				later = &winners[0]
+			if later != nil {
 				rel.ValidTo, rel.InvalidatedBy = later.ValidFrom, later.ID
 			}
 		}
@@ -566,6 +567,18 @@ func persistGraph(ont store.OntologyStore, g ExtractedGraph, concepts []Extracte
 			continue
 		}
 		relations++
+		if later != nil {
+			// AddRelation leaves valid_to alone on an edge already written, so an
+			// edge recompiled after a later one arrived is ended here too.
+			if err := ont.SetRelationValidTo(edgeID, later.ValidFrom, later.ID); err != nil {
+				log.Warn("triples: ending the edge at the later one failed", "edge", edgeID, "error", err)
+			}
+		}
+		for _, e := range earlier {
+			if err := ont.SetRelationValidTo(e.ID, validFrom, edgeID); err != nil {
+				log.Warn("triples: shortening an earlier edge failed", "edge", e.ID, "error", err)
+			}
+		}
 
 		if !hooks.enabled {
 			continue
@@ -663,6 +676,51 @@ func laterFunctionalWinners(ont store.OntologyStore, r ExtractedRelation, validF
 		return winners[i].ID < winners[j].ID
 	})
 	return winners, nil
+}
+
+// functionalNeighbours places a functional edge r starting at validFrom in
+// the history of its source and predicate, across every alias form of the
+// source, excluding edges to any form of r's own target. later is the
+// earliest edge that starts after validFrom, cleared threshold and was ever
+// live (one closed at its own start never held), live now or not: in date
+// order it would have superseded r. earlier are the edges that start at or
+// before validFrom and are still live at it: in date order r would have
+// ended them there. One that starts on the same date ends at its own start,
+// so of two edges dated alike the later compiled wins, as with
+// InvalidateFunctional.
+func functionalNeighbours(ont store.OntologyStore, r ExtractedRelation, validFrom string, threshold float64) (later *store.Relation, earlier []store.Relation, err error) {
+	applied, err := ont.ListAliases(store.AliasApplied)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list aliases: %w", err)
+	}
+	keep := map[string]bool{}
+	for _, f := range ontology.IDForms(r.Target, applied) {
+		keep[f] = true
+	}
+	for _, src := range ontology.IDForms(r.Source, applied) {
+		hist, err := ont.RelationHistory(src, r.Predicate)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read %s history: %w", src, err)
+		}
+		for _, h := range hist {
+			if keep[h.TargetID] {
+				continue
+			}
+			switch {
+			case h.ValidFrom > validFrom:
+				held := h.ValidTo == "" || h.ValidTo > h.ValidFrom
+				if held && h.Confidence >= threshold &&
+					(later == nil || h.ValidFrom < later.ValidFrom || (h.ValidFrom == later.ValidFrom && h.ID < later.ID)) {
+					h := h
+					later = &h
+				}
+			case h.ValidFrom <= validFrom && (h.ValidTo == "" || h.ValidTo > validFrom):
+				earlier = append(earlier, h)
+			}
+		}
+	}
+	sort.Slice(earlier, func(i, j int) bool { return earlier[i].ID < earlier[j].ID })
+	return later, earlier, nil
 }
 
 // Per-document caps and fan-out defaults. Applied in-function because

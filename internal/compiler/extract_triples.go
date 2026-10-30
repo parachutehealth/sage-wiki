@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -417,8 +418,12 @@ func emitEdgeConflict(h temporalHooks, sourceDoc, question, answer string) {
 // alias applied by this run reveals later-dated winners the write-time check
 // could not see, the latest winner's supersession is re-fired instead, which
 // closes this edge, and any other competitor, where that winner starts.
+// Entries run newest first, so an older entry's re-fire cannot close the
+// edge a newer entry keeps current; equal dates keep compile order.
 func runSupersessionSweep(ont store.OntologyStore, supersessions []FunctionalSupersession) {
-	for _, sup := range supersessions {
+	ordered := slices.Clone(supersessions)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].NewValidFrom > ordered[j].NewValidFrom })
+	for _, sup := range ordered {
 		winners, err := laterFunctionalWinners(ont, ExtractedRelation{Source: sup.SourceID, Predicate: sup.Predicate, Target: sup.KeepTargetID},
 			sup.NewValidFrom, sup.Threshold)
 		if err != nil {

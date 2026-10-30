@@ -431,6 +431,33 @@ func TestFunctionalSupersessionFollowsValidFrom(t *testing.T) {
 		}
 	})
 
+	// The target comes back after another: under three forms, acme (2022),
+	// initech (2023), then acme again (2024), merged by resolution. Swept
+	// oldest first, the 2022 edge fires initech's supersession, which closes
+	// the 2024 acme edge at its own start and leaves nothing current.
+	t.Run("target returns after another, merged by resolution", func(t *testing.T) {
+		ont, ts := temporalTestStores(t)
+		dir := t.TempDir()
+		var sup []FunctionalSupersession
+		sup = append(sup, runDatedDoc(t, ont, ts, temporalCfg(), worksAt("alice_c", "acme", "Alice works at Acme."), dir, "raw/2022.md", "2022-01-01")...)
+		sup = append(sup, runDatedDoc(t, ont, ts, temporalCfg(), worksAt("alice_b", "initech", "Alice works at Initech."), dir, "raw/2023.md", "2023-01-01")...)
+		sup = append(sup, runDatedDoc(t, ont, ts, temporalCfg(), worksAt("alice", "acme", "Alice works at Acme."), dir, "raw/2024.md", "2024-01-01")...)
+		link(t, ont, "alice_b")
+		link(t, ont, "alice_c")
+		runSupersessionSweep(ont, sup)
+
+		targets := liveTargets(t, ont, "alice")
+		if len(targets) == 0 {
+			t.Fatal("no live target, want acme (the newest edge)")
+		}
+		for _, target := range targets {
+			if target != "acme" {
+				t.Errorf("live targets = %v, want only acme (the newest edge)", targets)
+				break
+			}
+		}
+	})
+
 	t.Run("lookup failure skips the sweep", func(t *testing.T) {
 		ont, ts := temporalTestStores(t)
 		dir := t.TempDir()

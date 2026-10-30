@@ -300,6 +300,13 @@ type CompilerConfig struct {
 	SplitThreshold         int    `yaml:"split_threshold,omitempty"`           // chars, enable section-aware writing above this (default: 15000)
 	MaxSourceContextTokens *int   `yaml:"max_source_context_tokens,omitempty"` // max estimated tokens in source context (default: 100000)
 	SplitStrategy          string `yaml:"split_strategy,omitempty"`            // "headings" (default)
+	// SourcePartMaxChars caps each part of the write pass's source context:
+	// a whole source under split_threshold, or one heading section of a
+	// larger one. Counted in bytes, like split_threshold. *int so "unset"
+	// (nil → 4000, the historical cap) is distinguishable from an explicit
+	// 0 (no per-part cap; max_source_context_tokens still bounds the whole
+	// context).
+	SourcePartMaxChars *int `yaml:"source_part_max_chars,omitempty"`
 
 	// Backpressure
 	BackpressureEnabled *bool `yaml:"backpressure,omitempty"` // enable adaptive backpressure (default: true)
@@ -437,6 +444,18 @@ func (c CompilerConfig) MaxSourceContextTokensOrDefault() int {
 		return 100000
 	}
 	return *c.MaxSourceContextTokens
+}
+
+// SourcePartMaxCharsOrDefault resolves the write pass's per-part cap:
+// nil → 4000, N > 0 → N, explicit 0 or negative → -1 (no per-part cap).
+func (c CompilerConfig) SourcePartMaxCharsOrDefault() int {
+	if c.SourcePartMaxChars == nil {
+		return 4000
+	}
+	if *c.SourcePartMaxChars <= 0 {
+		return -1
+	}
+	return *c.SourcePartMaxChars
 }
 
 // QualityThreshold returns the configured low-quality warning threshold,

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`compiler.source_part_max_chars` sets the write pass's per-part source
+  cut.** `buildSourceContext` cut every part of an article's source
+  context, a whole source under `split_threshold` or one section of a
+  split source, at a literal 4,000 bytes, so a fact further down a source
+  reached the summaries and the graph but never the article. The cut is
+  now this option: unset keeps 4,000, a positive value is the cap, and 0
+  or a negative value keeps parts whole, leaving
+  `max_source_context_tokens` to bound the context. The top-ranked part,
+  which was kept whole even over that budget, is now cut to fit it, since
+  without the 4,000-byte cut one part can exceed it alone. Each cut is logged at
+  WARN with the concept, the source and the bytes dropped, and lands on a
+  UTF-8 boundary. The option is part of the compile key, so the first
+  compile after upgrading recompiles every document once.
+
 ### Fixed
 
 - **`serve`, `web`, `mcp`, `query` and `compile --re-embed` now open a

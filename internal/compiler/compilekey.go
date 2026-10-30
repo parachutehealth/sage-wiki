@@ -304,6 +304,7 @@ func compileConfigSubset(cfg *config.Config) map[string]any {
 	put("compiler.split_threshold", intOrDefault(c.SplitThreshold, 15000)) // write.go:60
 	put("compiler.max_source_context_tokens", c.MaxSourceContextTokensOrDefault())
 	put("compiler.split_strategy", strOrDefault(c.SplitStrategy, "headings"))
+	put("compiler.source_part_max_chars", c.SourcePartMaxCharsOrDefault())
 	put("compiler.min_concept_sources", c.MinConceptSourcesOrDefault())
 	put("compiler.strip_broken_links", c.StripBrokenLinks)
 	put("compiler.summary_naming", c.SummaryNamingOrDefault())
@@ -504,6 +505,7 @@ var subsetPolicy = map[string]string{
 	"compiler.quality.weight_wikilink":             "",
 	"compiler.split_strategy":                      "",
 	"compiler.split_threshold":                     "",
+	"compiler.source_part_max_chars":               "",
 	"compiler.strip_broken_links":                  "",
 	"compiler.summary_max_tokens":                  "",
 	"compiler.summary_naming":                      "",

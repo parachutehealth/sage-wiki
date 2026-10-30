@@ -215,6 +215,9 @@ func (s *Store) RelationHistory(sourceID, relationType string) ([]Relation, erro
 
 // SetRelationValidTo implements store.OntologyStore. See the interface doc.
 func (s *Store) SetRelationValidTo(id, validTo, invalidatedBy string) error {
+	if validTo == "" {
+		return fmt.Errorf("ontology.SetRelationValidTo: empty validTo for %s would reopen the edge", id)
+	}
 	var changed int64
 	err := s.db.WriteTx(func(tx *sql.Tx) error {
 		for _, table := range []string{"relations", "derived_relations"} {

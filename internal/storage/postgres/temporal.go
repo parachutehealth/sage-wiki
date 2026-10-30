@@ -162,6 +162,39 @@ func (s *ontologyStore) InvalidateFunctional(sourceID, predicate, keepTargetID, 
 	return invalidated, nil
 }
 
+// RelationHistory implements store.OntologyStore. See the interface doc.
+func (s *ontologyStore) RelationHistory(sourceID, relationType string) ([]store.Relation, error) {
+	rows, err := s.b.pool.Query(s.unionIfDerived(
+		"SELECT "+relationCols+" FROM relations WHERE source_id=$1 AND relation=$2",
+		"d.source_id=$1 AND d.relation=$2"), sourceID, relationType)
+	if err != nil {
+		return nil, fmt.Errorf("postgres.RelationHistory: %w", err)
+	}
+	defer rows.Close()
+	return scanRelations(rows)
+}
+
+// SetRelationValidTo implements store.OntologyStore. See the interface doc.
+func (s *ontologyStore) SetRelationValidTo(id, validTo, invalidatedBy string) error {
+	err := s.b.WriteTx(func(tx *sql.Tx) error {
+		for _, table := range []string{"relations", "derived_relations"} {
+			if table == "derived_relations" && !s.b.derivedExistsFresh() {
+				continue
+			}
+			if _, err := tx.Exec(`UPDATE `+table+` SET valid_to = $1, invalidated_by = $2 WHERE id = $3`,
+				nullStr(validTo), nullStr(invalidatedBy), id); err != nil {
+				return fmt.Errorf("postgres.SetRelationValidTo: update %s: %w", table, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	ontology.EmitEdgeInvalidated(s.sink, id, invalidatedBy, nil, parseValidStamp(validTo))
+	return nil
+}
+
 // parseValidStamp parses an RFC3339 validity stamp; nil when empty or
 // unparseable (unknown windows are reported as unknown, never faked).
 func parseValidStamp(v string) *time.Time {

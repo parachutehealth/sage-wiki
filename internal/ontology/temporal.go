@@ -197,6 +197,43 @@ func (s *Store) InvalidateFunctional(sourceID, predicate, keepTargetID, newValid
 	return invalidated, nil
 }
 
+// RelationHistory implements store.OntologyStore. See the interface doc.
+func (s *Store) RelationHistory(sourceID, relationType string) ([]Relation, error) {
+	q := `SELECT ` + relationCols + ` FROM relations WHERE source_id=? AND relation=?`
+	args := []any{sourceID, relationType}
+	if s.derivedExists() {
+		q += "\nUNION ALL" + derivedArm(`d.source_id=? AND d.relation=?`)
+		args = append(args, sourceID, relationType)
+	}
+	rows, err := s.db.ReadDB().Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ontology.RelationHistory: %w", err)
+	}
+	defer rows.Close()
+	return scanRelations(rows)
+}
+
+// SetRelationValidTo implements store.OntologyStore. See the interface doc.
+func (s *Store) SetRelationValidTo(id, validTo, invalidatedBy string) error {
+	err := s.db.WriteTx(func(tx *sql.Tx) error {
+		for _, table := range []string{"relations", "derived_relations"} {
+			if table == "derived_relations" && !s.derivedExistsFresh() {
+				continue
+			}
+			if _, err := tx.Exec(`UPDATE `+table+` SET valid_to = ?, invalidated_by = ? WHERE id = ?`,
+				validTo, invalidatedBy, id); err != nil {
+				return fmt.Errorf("ontology.SetRelationValidTo: update %s: %w", table, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.emitEdgeInvalidated(id, invalidatedBy, parseValid(validTo))
+	return nil
+}
+
 func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }

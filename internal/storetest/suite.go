@@ -30,6 +30,7 @@ func RunConformance(t *testing.T, newBackend BackendFactory) {
 	t.Run("temporal_validity", TemporalValidityConformance(newBackend))
 	t.Run("temporal_upsert_backfill", TemporalUpsertBackfillConformance(newBackend))
 	t.Run("invalidate_functional", InvalidateFunctionalConformance(newBackend))
+	t.Run("relation_history", RelationHistoryConformance(newBackend))
 	t.Run("communities", CommunitiesConformance(newBackend))
 	t.Run("trust", TrustConformance(newBackend))
 	t.Run("compile_items", CompileItemsConformance(newBackend))
@@ -1866,6 +1867,87 @@ func TemporalUpsertBackfillConformance(new BackendFactory) func(*testing.T) {
 		}
 		if vf := rels[0].ValidFrom; vf != "" {
 			t.Errorf("losing re-assertion must backfill nothing, got %q", vf)
+		}
+	}
+}
+
+// RelationHistoryConformance: RelationHistory returns a source's edges on a
+// relation whatever their validity, derived copies included, and
+// SetRelationValidTo rewrites valid_to on an edge by ID, closed or not (a
+// derived copy has its own ID), so three edges can be laid end to end out of
+// compile order.
+func RelationHistoryConformance(new BackendFactory) func(*testing.T) {
+	return func(t *testing.T) {
+		b := new(t)
+		os := b.Ontology()
+		for _, id := range []string{"s", "a", "x", "y", "z"} {
+			if err := os.AddEntity(store.Entity{ID: id, Type: "concept", Name: id}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, r := range []store.Relation{
+			{ID: "r-x", SourceID: "s", TargetID: "x", Relation: "works_at", Confidence: 0.9,
+				ValidFrom: "2022-01-01T00:00:00Z", ValidTo: "2024-01-01T00:00:00Z", InvalidatedBy: "r-y"},
+			{ID: "r-y", SourceID: "s", TargetID: "y", Relation: "works_at", Confidence: 0.9,
+				ValidFrom: "2024-01-01T00:00:00Z"},
+			// Under alias form a; LinkAlias derives a copy onto s with its own ID.
+			{ID: "r-z", SourceID: "a", TargetID: "z", Relation: "works_at", Confidence: 0.9,
+				ValidFrom: "2023-01-01T00:00:00Z"},
+		} {
+			if err := os.AddRelation(r); err != nil {
+				t.Fatalf("AddRelation(%s): %v", r.ID, err)
+			}
+		}
+		if _, err := os.LinkAlias(store.EntityAlias{
+			Alias: "a", CanonicalID: "s", EntityType: "concept",
+			Status: store.AliasApplied, Source: "llm", CreatedAt: "2026-07-29T00:00:00Z",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		hist, err := os.RelationHistory("s", "works_at")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var copied string // the derived copy of r-z, which has its own ID
+		ends := map[string]string{}
+		for _, r := range hist {
+			ends[r.TargetID] = r.ValidTo
+			if r.TargetID == "z" {
+				copied = r.ID
+			}
+		}
+		if len(hist) != 3 || ends["x"] != "2024-01-01T00:00:00Z" || ends["y"] != "" || copied == "" {
+			t.Fatalf("RelationHistory(s) = %+v, want r-x (closed at 2024), r-y and the derived copy of r-z", hist)
+		}
+
+		if err := os.SetRelationValidTo("r-x", "2023-01-01T00:00:00Z", copied); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.SetRelationValidTo(copied, "2024-01-01T00:00:00Z", "r-y"); err != nil {
+			t.Fatal(err)
+		}
+		hist, err = os.RelationHistory("s", "works_at")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range hist {
+			if r.ID == "r-x" && (r.ValidTo != "2023-01-01T00:00:00Z" || r.InvalidatedBy != copied) {
+				t.Errorf("r-x = to %q by %q, want to 2023 by %s", r.ValidTo, r.InvalidatedBy, copied)
+			}
+			if r.ID == copied && (r.ValidTo != "2024-01-01T00:00:00Z" || r.InvalidatedBy != "r-y") {
+				t.Errorf("%s = to %q by %q, want to 2024 by r-y", copied, r.ValidTo, r.InvalidatedBy)
+			}
+		}
+		for asOf, want := range map[string]string{"2022-06-01": "x", "2023-06-01": "z", "2024-06-01": "y"} {
+			at, _ := time.Parse("2006-01-02", asOf)
+			live, err := os.GetRelationsAt("s", store.Outbound, "works_at", at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(live) != 1 || live[0].TargetID != want {
+				t.Errorf("live at %s = %+v, want only %s", asOf, live, want)
+			}
 		}
 	}
 }

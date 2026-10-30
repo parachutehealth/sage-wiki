@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- **`serve`, `web`, `mcp`, `query` and `compile --re-embed` now open a
+  postgres vault.** `app.OpenWithOptions` and the re-embed path built
+  `store.OpenOptions` without `VectorDimension`, so every writer open with
+  `storage.backend: postgres` failed with "vector_dimension required when
+  backend=postgres" even when `config.yaml` set it. They now pass it the
+  way `storedial.OpenWithConfig` already did.
 - **`serve --ui` starts on postgres: one process's writer backends share
   the vault lock.** The compile worker, web UI and MCP server each opened
   a writer and each took the vault's session advisory lock on its own

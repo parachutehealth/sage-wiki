@@ -245,7 +245,8 @@ threshold or one matching section of a split source, to
 ("write pass: source part truncated", with the concept, the source and the
 bytes dropped). A fact past the cut reaches the summaries and the graph but
 not the article. `max_source_context_tokens` (default 100,000) bounds the
-whole context, keeping the highest-ranked parts first:
+whole context, keeping the highest-ranked parts first and cutting the
+top-ranked part to fit when it alone is over the budget:
 
 ```yaml
 compiler:

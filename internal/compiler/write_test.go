@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/xoai/sage-wiki/internal/config"
+	"github.com/xoai/sage-wiki/internal/extract"
 	"github.com/xoai/sage-wiki/internal/manifest"
 	"github.com/xoai/sage-wiki/internal/ontology"
 	"github.com/xoai/sage-wiki/internal/storage"
@@ -768,6 +769,18 @@ func TestBuildSourceContext_SourcePartMaxChars(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("no per-part cap still fits the token budget", func(t *testing.T) {
+		// 40,000 bytes with no headings: one part, about 10,000 tokens.
+		big := write("big.md", "Cowboy "+strings.Repeat("z", 40000))
+		ctx := buildSourceContext(dir, ExtractedConcept{Name: "cowboy", Sources: []string{big}}, 15000, 2000, cfgCap(&zero))
+		if got := extract.EstimateTokens(ctx); got > 2010 {
+			t.Errorf("context is %d estimated tokens, budget 2000", got)
+		}
+		if !strings.HasPrefix(ctx, "### Source: big.md") || !strings.Contains(ctx, marker) {
+			t.Errorf("context lacks its header or the cut marker: %.80q", ctx)
+		}
+	})
 
 	t.Run("cut lands on a rune boundary", func(t *testing.T) {
 		ctx := buildSourceContext(dir, ExtractedConcept{Name: "x", Sources: []string{runes}}, 15000, 100000, cfgCap(nil))

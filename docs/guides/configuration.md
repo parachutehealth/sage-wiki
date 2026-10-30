@@ -167,7 +167,8 @@ compiler:
   # auto_demote: true          # demote stale articles
   # split_threshold: 15000     # chars — split large docs for faster writing
   # max_source_context_tokens: 100000 # estimated-token budget for one article's source
-                              # context; the highest-ranked part is always kept
+                              # context; the highest-ranked part is always kept,
+                              # cut to fit if it alone is over
   # source_part_max_chars: 4000 # bytes the write pass keeps of each source part (a
                               # whole source under split_threshold, or one section of
                               # a split source); 0 keeps parts whole, so only

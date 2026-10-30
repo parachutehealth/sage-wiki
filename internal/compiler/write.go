@@ -1162,7 +1162,23 @@ func buildSourceContext(projectDir string, concept ExtractedConcept, threshold i
 	for i, p := range parts {
 		partTokens := extract.EstimateTokens(p.text)
 		if i == 0 {
-			// Always keep the highest-ranked part, even if it exceeds budget.
+			// Always keep the highest-ranked part. Alone over the budget (a
+			// part can be large when source_part_max_chars is high or off),
+			// it is cut to fit so the budget still bounds the context.
+			if partTokens > maxTokens {
+				cut := prefixWithinTokens(p.text, maxTokens)
+				for cut > 0 && cut < len(p.text) && !utf8.RuneStart(p.text[cut]) {
+					cut--
+				}
+				log.Warn("source context budget exceeded by the top-ranked part; truncating it",
+					"concept", concept.Name,
+					"source", p.sourcePath,
+					"budget_tokens", maxTokens,
+					"estimated_tokens", partTokens,
+					"bytes_dropped", len(p.text)-cut)
+				p.text = p.text[:cut] + "\n[...truncated...]"
+				partTokens = extract.EstimateTokens(p.text)
+			}
 			kept = append(kept, p.text)
 			totalTokens = partTokens
 			continue
@@ -1207,6 +1223,22 @@ func capSourcePart(text string, maxChars int, concept, source string) string {
 		"bytes_dropped", len(text)-cut,
 		"source_part_max_chars", maxChars)
 	return text[:cut] + "\n[...truncated...]"
+}
+
+// prefixWithinTokens returns the length in bytes of the longest prefix of
+// text whose extract.EstimateTokens is at most maxTokens (the estimate only
+// grows as the prefix does).
+func prefixWithinTokens(text string, maxTokens int) int {
+	lo, hi := 0, len(text)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if extract.EstimateTokens(text[:mid]) <= maxTokens {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo
 }
 
 // RetryArticle re-writes ONE article from scratch (issue #144 blocking

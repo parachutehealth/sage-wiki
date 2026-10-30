@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/xoai/sage-wiki/internal/log"
+	"github.com/xoai/sage-wiki/internal/manifest"
 	"github.com/xoai/sage-wiki/internal/metrics"
 	"github.com/xoai/sage-wiki/internal/prompts"
 	"github.com/xoai/sage-wiki/internal/storage"
@@ -38,6 +41,9 @@ type workerHarness struct {
 	// names this source path answer with JSON that fails the schema.
 	failExtractFor atomic.Pointer[string]
 }
+
+// extractSourceRE finds a source path in a concept-extraction prompt.
+var extractSourceRE = regexp.MustCompile(`### Source: (\S+)`)
 
 // newWorkerHarness builds a temp project whose openai-compatible provider
 // is a mock server answering chat completions (per-pass content, the
@@ -71,7 +77,12 @@ func newWorkerHarness(t *testing.T, defaultTier int, embedStatus int) *workerHar
 		var content string
 		switch {
 		case strings.Contains(lastMsg, "concept extraction system"):
-			content = `[{"name": "test-concept", "aliases": [], "sources": ["raw/a.md"], "type": "concept"}]`
+			// The concept names the batch's first source, as a model would.
+			src := "raw/a.md"
+			if m := extractSourceRE.FindStringSubmatch(lastMsg); m != nil {
+				src = m[1]
+			}
+			content = `[{"name": "test-concept", "aliases": [], "sources": ["` + src + `"], "type": "concept"}]`
 			if p := h.failExtractFor.Load(); p != nil && strings.Contains(lastMsg, "### Source: "+*p) {
 				content = `{"not": "the concepts array"}`
 			}
@@ -299,6 +310,57 @@ func TestWorker_FailedExtractBatchSourcesRetry(t *testing.T) {
 	b, _ = h.items.GetByPath("raw/b.md")
 	if b.Status != "done" || !b.PassExtracted || !b.PassWritten {
 		t.Errorf("b.md after cycle 2: status %q, extracted %v, written %v; want done with both passes", b.Status, b.PassExtracted, b.PassWritten)
+	}
+	mf, err := manifest.Load(filepath.Join(h.dir, ".manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srcs := mf.Concepts["test-concept"].Sources; !slices.Contains(srcs, "raw/b.md") {
+		t.Errorf("test-concept sources after cycle 2 = %v, want raw/b.md among them", srcs)
+	}
+}
+
+// A source whose extraction batch failed and whose file is then deleted is
+// still seen as removed: the next cycle drops its queue row (and cleans up
+// its summary's records) instead of claiming a missing file until it
+// dead-letters.
+func TestWorker_FailedExtractBatchSourceRemoved(t *testing.T) {
+	h := newWorkerHarness(t, 3, http.StatusOK)
+	cfgPath := filepath.Join(h.dir, "config.yaml")
+	cfg, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg = []byte(strings.Replace(string(cfg), "compiler:\n", "compiler:\n  extract_batch_size: 1\n", 1))
+	if err := os.WriteFile(cfgPath, cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.writeSource(t, "a.md", "# Alpha\n\nAlpha content for the full pipeline.")
+	h.writeSource(t, "b.md", "# Beta\n\nBeta content for the full pipeline.")
+	h.newWorker(t, 50*time.Millisecond, time.Second, 5)
+	for _, p := range []string{"raw/a.md", "raw/b.md"} {
+		if err := h.items.Upsert(CompileItem{SourcePath: p, Hash: "h1", FileType: "md", Tier: 3}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	failing := "raw/b.md"
+	h.failExtractFor.Store(&failing)
+	if _, err := h.worker.cycle(context.Background()); err != nil {
+		t.Fatalf("cycle 1: %v", err)
+	}
+	if b, _ := h.items.GetByPath("raw/b.md"); b == nil || b.Status != "pending" {
+		t.Fatalf("setup: b.md after cycle 1 = %+v, want pending", b)
+	}
+
+	if err := os.Remove(filepath.Join(h.dir, "raw", "b.md")); err != nil {
+		t.Fatal(err)
+	}
+	h.failExtractFor.Store(nil)
+	if _, err := h.worker.cycle(context.Background()); err != nil {
+		t.Fatalf("cycle 2: %v", err)
+	}
+	if b, _ := h.items.GetByPath("raw/b.md"); b != nil {
+		t.Errorf("b.md after its file was deleted: queue row %+v still present, want it dropped", b)
 	}
 }
 

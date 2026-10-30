@@ -330,16 +330,20 @@ func runFullPipeline(sources []SourceInfo, opts FullPipelineOpts) *FullPipelineR
 			progress.ItemError("concept extraction (partial)", err)
 			// The skipped sources were summarized but never extracted. Leave
 			// them out of SucceededSources, so no caller marks them extracted
-			// and written, and put their manifest entries back, so the next
-			// diff sees them again: they retry like a failed summary does.
+			// and written, and put their manifest entries back with no hash.
+			// A blank hash matches no file, so the next diff reports each one
+			// modified, and it retries like a failed summary does; or, once
+			// the file is gone, removed, so its summary's search entry and
+			// vector are cleaned up.
 			skipped := make(map[string]bool, len(pfe.Skipped))
 			for _, p := range pfe.Skipped {
 				skipped[p] = true
+				src := mf.Sources[p]
 				if prev := priorSources[p]; prev != nil {
-					mf.Sources[p] = *prev
-				} else {
-					mf.RemoveSource(p)
+					src = *prev
 				}
+				src.Hash = ""
+				mf.Sources[p] = src
 			}
 			kept := result.SucceededSources[:0]
 			for _, p := range result.SucceededSources {
